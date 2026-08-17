@@ -687,14 +687,14 @@ def _truthsocial_record(config):
 
 
 def _perplexity_record(config):
-    requires = "PERPLEXITY_API_KEY or OPENROUTER_API_KEY + INCLUDE_SOURCES=perplexity"
-    has_key = bool(config.get("PERPLEXITY_API_KEY") or config.get("OPENROUTER_API_KEY"))
+    requires = "PERPLEXITY_API_KEY + INCLUDE_SOURCES=perplexity"
+    has_key = bool(config.get("PERPLEXITY_API_KEY"))
     include = env.include_sources(config)
     if not has_key:
         return _record(
             status="unconfigured", requires=requires,
             fix=(
-                "set PERPLEXITY_API_KEY or OPENROUTER_API_KEY in "
+                "set PERPLEXITY_API_KEY in "
                 "~/.config/last30days/.env, then add perplexity to INCLUDE_SOURCES"
             ),
         )

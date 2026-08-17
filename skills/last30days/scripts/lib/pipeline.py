@@ -140,7 +140,9 @@ RELATED_HANDLE_COUNT_PER = 3
 
 
 def _has_perplexity_provider(config: dict[str, Any]) -> bool:
-    return bool(config.get("PERPLEXITY_API_KEY") or config.get("OPENROUTER_API_KEY"))
+    # The Perplexity source calls Perplexity's Agent and Search APIs directly.
+    # OPENROUTER_API_KEY remains a generic reasoning-provider credential only.
+    return bool(config.get("PERPLEXITY_API_KEY"))
 
 MOCK_AVAILABLE_SOURCES = [
     "reddit",
@@ -264,7 +266,7 @@ def available_sources(
         available.append("grounding")
     if requested_sources and "jobs" in requested_sources:
         available.append("jobs")
-    # Perplexity Sonar: opt-in additive source via INCLUDE_SOURCES=perplexity
+    # Perplexity Agent API: opt-in additive source via INCLUDE_SOURCES=perplexity
     if _has_perplexity_provider(config) and (
         "perplexity" in include_sources or (requested_sources and "perplexity" in requested_sources)
     ):
@@ -3204,15 +3206,21 @@ def _legacy_artifact_outcome(
     if source == "perplexity" and artifact.get("error"):
         error = str(artifact["error"])
         detail = str(
-            artifact.get("asyncErrorMessage")
+            artifact.get("backgroundErrorMessage")
+            or artifact.get("backgroundPollError")
+            or artifact.get("agentErrorMessage")
+            or artifact.get("asyncErrorMessage")
             or artifact.get("message")
             or error
         )
+        status_code = artifact.get("statusCode")
+        if status_code is None:
+            status_code = artifact.get("backgroundPollStatusCode")
         state = (
             health.TIMEOUT
             if error.lower() == "timeout"
             else http.classify_failure(
-                status_code=artifact.get("statusCode"),
+                status_code=status_code,
                 message=f"{error}: {detail}",
             )
         )

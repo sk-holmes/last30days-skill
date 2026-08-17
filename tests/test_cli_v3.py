@@ -131,12 +131,12 @@ class CliV3Tests(unittest.TestCase):
         )
         self.assertIn("threads", available)
 
-    def test_explicit_perplexity_search_uses_openrouter_key_without_include_sources(self):
+    def test_explicit_perplexity_search_rejects_openrouter_only_config(self):
         available = cli.pipeline.available_sources(
             {"OPENROUTER_API_KEY": "test-key", "INCLUDE_SOURCES": ""},
             requested_sources=["perplexity"],
         )
-        self.assertIn("perplexity", available)
+        self.assertNotIn("perplexity", available)
 
     def test_explicit_perplexity_search_uses_direct_key_without_include_sources(self):
         available = cli.pipeline.available_sources(
@@ -193,6 +193,16 @@ class CliV3Tests(unittest.TestCase):
         args, extra = parser.parse_known_args(["--web-backend", "keyless", "biosecurity"])
         self.assertEqual("keyless", args.web_backend)
         self.assertEqual([], extra)
+
+    def test_deep_research_help_requires_direct_perplexity_key(self):
+        parser = cli.build_parser()
+        action = next(
+            candidate
+            for candidate in parser._actions
+            if "--deep-research" in candidate.option_strings
+        )
+        self.assertIn("PERPLEXITY_API_KEY", action.help)
+        self.assertNotIn("OPENROUTER_API_KEY", action.help)
 
     def test_build_parser_still_accepts_other_web_backend_values(self):
         parser = cli.build_parser()

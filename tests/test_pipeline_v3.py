@@ -1713,6 +1713,37 @@ class TestExcludeSources(unittest.TestCase):
 
 
 class TestPerplexityAvailability(unittest.TestCase):
+    def test_agent_background_failure_uses_safe_provider_detail(self):
+        outcome = pipeline._legacy_artifact_outcome(
+            "perplexity",
+            {
+                "error": "failed",
+                "backgroundErrorMessage": "Provider reported an incomplete run",
+            },
+        )
+
+        self.assertEqual(health.ERROR, outcome["state"])
+        self.assertEqual("Provider reported an incomplete run", outcome["detail"])
+
+    def test_agent_background_poll_429_is_rate_limited(self):
+        outcome = pipeline._legacy_artifact_outcome(
+            "perplexity",
+            {
+                "error": "poll_error",
+                "backgroundPollError": "HTTP 429: Too Many Requests",
+                "backgroundPollStatusCode": 429,
+            },
+        )
+
+        self.assertEqual(health.RATE_LIMITED, outcome["state"])
+        self.assertEqual("HTTP 429: Too Many Requests", outcome["detail"])
+
+    def test_perplexity_source_not_available_with_openrouter_only(self):
+        sources = pipeline.available_sources(
+            {"OPENROUTER_API_KEY": "test-key", "INCLUDE_SOURCES": "perplexity"}
+        )
+        self.assertNotIn("perplexity", sources)
+
     def test_perplexity_source_not_available_with_direct_key_without_opt_in(self):
         sources = pipeline.available_sources({"PERPLEXITY_API_KEY": "test-key"})
         self.assertNotIn("perplexity", sources)

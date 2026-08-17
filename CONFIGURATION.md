@@ -160,7 +160,7 @@ python3 skills/last30days/scripts/last30days.py "MCP servers" \
 | Bluesky | `BSKY_HANDLE` + `BSKY_APP_PASSWORD` | Bluesky items | yes (app password at bsky.app) |
 | TruthSocial | `TRUTHSOCIAL_TOKEN` | TruthSocial items | yes |
 | Web search | one of: `BRAVE_API_KEY`, `EXA_API_KEY`, `SERPER_API_KEY`, `PARALLEL_API_KEY` | `--auto-resolve` and Step 2 supplements | Brave has a free tier; native WebSearch on Claude Code / Codex / Gemini works as a fallback |
-| Perplexity Sonar / Search API / Deep Research | `PERPLEXITY_API_KEY` (preferred) or `OPENROUTER_API_KEY` (Sonar fallback) | `INCLUDE_SOURCES=perplexity`; `--deep-research` flag (~$0.90/query) | no |
+| Perplexity Agent API / Search API / Deep Research | `PERPLEXITY_API_KEY` | `INCLUDE_SOURCES=perplexity`; `--deep-research` flag starts a paid background run | no |
 | Caption-free transcription | `GROQ_API_KEY` (free tier, preferred) or `OPENAI_API_KEY` (paid backstop); requires `ffmpeg` | Whisper transcription for audio/video without captions (groundwork: module shipped, not yet auto-invoked by the engine) | Groq free tier is generous; needs ffmpeg installed |
 | Jobs / careers pages | none for public ATS pages; web backend improves fallback discovery | `--hiring-signals` and strong Hiring Signals in standard company reports | yes |
 | Apify (alternate scraper) | `APIFY_API_TOKEN` | fallback for Reddit/TikTok/Instagram when ScrapeCreators is exhausted | yes (limited) |
@@ -191,8 +191,9 @@ INCLUDE_SOURCES=tiktok,instagram
 # Add perplexity to INCLUDE_SOURCES when you want the paid Perplexity source.
 # PERPLEXITY_API_KEY=<your-perplexity-key>
 # INCLUDE_SOURCES=tiktok,instagram,perplexity
-# LAST30DAYS_PERPLEXITY_MODE=sonar  # sonar | search | both
-# LAST30DAYS_PERPLEXITY_MODEL=sonar-pro  # sonar | sonar-pro | sonar-reasoning-pro
+# LAST30DAYS_PERPLEXITY_MODE=agent  # agent | search | both; sonar is a legacy alias
+# LAST30DAYS_PERPLEXITY_AGENT_MODEL=perplexity/sonar
+# LAST30DAYS_PERPLEXITY_AGENT_MAX_STEPS=5
 
 # X authentication (one option only)
 AUTH_TOKEN=<your-auth-token>
@@ -220,33 +221,41 @@ After editing: `chmod 600 ~/.config/last30days/.env` (or `chmod 600 .claude/last
 
 ### Perplexity source modes
 
-Perplexity is a paid opt-in source. A direct `PERPLEXITY_API_KEY` unlocks first-party Perplexity features. `OPENROUTER_API_KEY` remains a Sonar compatibility fallback only; Perplexity Search API and async Deep Research call Perplexity directly.
+Perplexity is a paid opt-in source. `PERPLEXITY_API_KEY` is required for every Perplexity source request. `OPENROUTER_API_KEY` remains available for generic reasoning and auto-resolve, but it is not a credential fallback for the Perplexity source.
 
 `LAST30DAYS_PERPLEXITY_MODE` controls normal `perplexity` source runs:
 
 | Value | Behavior | Calls |
 |---|---|---|
-| `sonar` (default) | Sonar synthesis plus citations. | one Sonar call |
+| `agent` (default) | Controlled Agent API synthesis with only an explicit `web_search` tool. | one Agent API call |
+| `sonar` | Deprecated alias for `agent`. | one Agent API call |
 | `search` | Raw ranked Search API rows; best when you want source aggregation over prose. | one Search API call |
-| `both` | Sonar synthesis plus raw ranked Search API rows, deduped by URL. | one Search API call and one Sonar call |
+| `both` | Agent API synthesis plus raw ranked Search API rows, deduped by URL. | one Search API call and one Agent API call |
 
-`--deep-research` ignores `LAST30DAYS_PERPLEXITY_MODE` and uses `sonar-deep-research`. With `PERPLEXITY_API_KEY`, it submits to Perplexity's async Sonar endpoint and polls with a hard wall-clock timeout. The async request uses a deterministic idempotency key derived from the request body. If the request is still running at timeout, fails remotely, or polling hits a transport/rate-limit error after the async id exists, the raw artifact records the async request id, idempotency key, last status, lifecycle timestamps returned by Perplexity, poll count, and timeout/error fields so you can inspect or resume by id outside the run. With only `OPENROUTER_API_KEY`, it keeps the OpenRouter synchronous fallback.
+Normal `agent` mode uses the controlled `last30days-controlled-web-search/v1` profile: `perplexity/sonar`, a bounded `max_steps`, a local instruction, and only the configured `web_search` tool. It does not enable sandbox, file, finance, MCP, or function tools.
+
+`LAST30DAYS_PERPLEXITY_AGENT_PRESET` is a separate explicit opt-in for a mutable Perplexity preset (`fast`, `low`, `medium`, or `high`). Presets can change their model, prompt, tools, cost, and output behavior. The engine still supplies its configured `web_search` tool so date, domain, location, result-count, and context constraints merge with the preset; other preset tools can remain enabled. Do not set this variable when you need the controlled profile. The engine never selects a preset automatically.
+
+`--deep-research` ignores `LAST30DAYS_PERPLEXITY_MODE` and starts an Agent API background run with the explicit dynamic `high` preset. This is a separate paid action. The engine merges its configured `web_search` constraints with that preset, but the provider controls its other tools and can change them; current presets may include tools beyond web search. A local timeout does not stop the remote run. The artifact retains the response ID, provider status, poll count, timeout, and safe error metadata, but not request headers or raw tool traces.
 
 Perplexity-specific env vars:
 
 | Env var | Default | Applies to | Notes |
 |---|---|---|---|
-| `LAST30DAYS_PERPLEXITY_MODE` | `sonar` | normal Perplexity source runs | `sonar`, `search`, or `both`; `search` and `both` require `PERPLEXITY_API_KEY`. |
-| `LAST30DAYS_PERPLEXITY_MODEL` | `sonar-pro` | direct Sonar only | Supported: `sonar`, `sonar-pro`, `sonar-reasoning-pro`. `--deep-research` forces `sonar-deep-research`. |
-| `LAST30DAYS_PERPLEXITY_MAX_RESULTS` | `10` | Search API | Clamped to Perplexity's 1..20 range. |
-| `LAST30DAYS_PERPLEXITY_SEARCH_CONTEXT_SIZE` | provider default | Search API | `low`, `medium`, or `high`; omitted unless set. |
-| `LAST30DAYS_PERPLEXITY_SEARCH_MODE` | provider default | direct Sonar | `web`, `academic`, or `sec`. |
-| `LAST30DAYS_PERPLEXITY_DOMAIN_FILTER` | unset | Search API and direct Sonar | Comma-separated domains, max 20. |
-| `LAST30DAYS_PERPLEXITY_LANGUAGE_FILTER` | unset | Search API and direct Sonar | Comma-separated ISO 639-1 language codes, max 20. |
-| `LAST30DAYS_PERPLEXITY_COUNTRY` | unset | Search API | Two-letter country code such as `US`. |
-| `LAST30DAYS_PERPLEXITY_RECENCY_FILTER` | unset | Search API and direct Sonar | `hour`, `day`, `week`, `month`, or `year`. |
-| `LAST30DAYS_PERPLEXITY_REASONING_EFFORT` | unset | direct Sonar | `minimal`, `low`, `medium`, or `high`. |
-| `LAST30DAYS_PERPLEXITY_DEEP_TIMEOUT_SECONDS` | `600` | direct async Deep Research | Wall-clock polling deadline. |
+| `LAST30DAYS_PERPLEXITY_MODE` | `agent` | normal Perplexity source runs | `agent`, `search`, or `both`; `sonar` remains a deprecated alias for `agent`. |
+| `LAST30DAYS_PERPLEXITY_AGENT_MODEL` | `perplexity/sonar` | controlled Agent profile | Explicit Agent model for normal synthesis. |
+| `LAST30DAYS_PERPLEXITY_AGENT_MAX_STEPS` | `5` | controlled Agent profile | Clamped to 1..15. |
+| `LAST30DAYS_PERPLEXITY_AGENT_TIMEOUT_SECONDS` | `120` | controlled Agent profile | Synchronous request timeout, clamped to 1..600 seconds. |
+| `LAST30DAYS_PERPLEXITY_AGENT_PRESET` | unset | normal Agent runs | Explicit mutable preset only: `fast`, `low`, `medium`, or `high`. It replaces the controlled profile for that run. |
+| `LAST30DAYS_PERPLEXITY_MAX_RESULTS` | `10` | Search API and all Agent `web_search` requests | Clamped to 1..20. |
+| `LAST30DAYS_PERPLEXITY_SEARCH_CONTEXT_SIZE` | provider default | Search API and all Agent `web_search` requests | `low`, `medium`, or `high`; omitted unless set. |
+| `LAST30DAYS_PERPLEXITY_DOMAIN_FILTER` | unset | Search API and all Agent `web_search` requests | Comma-separated domains, max 20. |
+| `LAST30DAYS_PERPLEXITY_LANGUAGE_FILTER` | unset | Search API only | Comma-separated ISO 639-1 language codes. Agent API has no equivalent. |
+| `LAST30DAYS_PERPLEXITY_COUNTRY` | unset | Search API and all Agent `web_search` requests | Two-letter country code such as `US`. |
+| `LAST30DAYS_PERPLEXITY_RECENCY_FILTER` | unset | Search API and all Agent `web_search` requests | `hour`, `day`, `week`, `month`, or `year`; exact date filters take precedence. |
+| `LAST30DAYS_PERPLEXITY_REASONING_EFFORT` | unset | controlled Agent profile | `minimal`, `low`, `medium`, or `high`. |
+| `LAST30DAYS_PERPLEXITY_DEEP_TIMEOUT_SECONDS` | `600` | Agent API background Deep Research | Wall-clock polling deadline; remote work can continue after a local timeout. |
+| `LAST30DAYS_PERPLEXITY_MODEL` / `LAST30DAYS_PERPLEXITY_SEARCH_MODE` | unset | legacy Sonar config | Retained for config-file compatibility. They do not select an Agent API preset or search mode. |
 
 ### Encrypted credential sources (Keychain / pass)
 
@@ -358,7 +367,7 @@ An explicit `--register` wins over `LAST30DAYS_REGISTER`; the environment/config
 1. **Gemini** - `GOOGLE_API_KEY` / `GEMINI_API_KEY` / `GOOGLE_GENAI_API_KEY`
 2. **OpenAI** - `OPENAI_API_KEY` only. Codex ChatGPT auth at `~/.codex/auth.json` is intentionally not used as an OpenAI provider credential.
 3. **xAI** - `XAI_API_KEY`
-4. **OpenRouter** - `OPENROUTER_API_KEY` (Sonar fallback for the Perplexity source / `--deep-research`; also usable as a reasoning provider)
+4. **OpenRouter** - `OPENROUTER_API_KEY` (generic reasoning provider and auto-resolve only; it does not authorize the Perplexity source)
 5. **Local / deterministic** - always available, lowest quality
 
 When you invoke `/last30days` from Claude Code, Codex, or Gemini, the host model **is** the reasoning provider for plan + synthesis - you don't need any of the keys above unless you also run the script headlessly (cron, CI, watchlist).

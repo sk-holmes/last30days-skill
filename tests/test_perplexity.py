@@ -4,106 +4,226 @@ from unittest.mock import patch
 from lib import perplexity
 
 
-class PerplexityProviderTests(unittest.TestCase):
-    def test_direct_perplexity_key_wins_and_parses_search_results(self):
-        response = {
-            "choices": [{"message": {"content": "Direct synthesis"}}],
-            "citations": ["https://example.com/a"],
-            "search_results": [
+def _agent_response(
+    text: str = "Agent synthesis",
+    *,
+    response_id: str = "agent-1",
+    status: str = "completed",
+    citations: list[dict] | None = None,
+    include_output_text: bool = True,
+) -> dict:
+    citation_parts = [
+        {
+            "type": "output_text",
+            "text": text,
+            "annotations": [
                 {
-                    "title": "Example A",
-                    "url": "https://example.com/a",
-                    "date": "2026-06-01",
-                    "snippet": "Direct source snippet",
-                    "source": "web",
+                    "url_citation": {
+                        "url": citation["url"],
+                        "title": citation.get("title", ""),
+                    }
                 }
+                for citation in citations or []
             ],
+        }
+    ]
+    response = {
+        "id": response_id,
+        "status": status,
+        "output": [
+            {"type": "message", "content": citation_parts},
+            {"type": "search_results", "results": citations or []},
+        ],
+        "usage": {"total_tokens": 123},
+    }
+    if include_output_text:
+        response["output_text"] = text
+    return response
+
+
+class PerplexityAgentTests(unittest.TestCase):
+    def test_controlled_agent_uses_direct_key_and_explicit_web_search(self):
+        citations = [
+            {
+                "title": "Example A",
+                "url": "https://example.com/a",
+                "date": "2026-06-01",
+                "snippet": "Direct source snippet",
+            }
+        ]
+        response = _agent_response("Direct synthesis", citations=citations)
+        config = {
+            "PERPLEXITY_API_KEY": "pplx-test",
+            "OPENROUTER_API_KEY": "or-test",
+            "LAST30DAYS_PERPLEXITY_MAX_RESULTS": "3",
+            "LAST30DAYS_PERPLEXITY_SEARCH_CONTEXT_SIZE": "low",
+            "LAST30DAYS_PERPLEXITY_COUNTRY": "us",
+            "LAST30DAYS_PERPLEXITY_DOMAIN_FILTER": "example.com,example.org",
+            "LAST30DAYS_PERPLEXITY_RECENCY_FILTER": "year",
+            "LAST30DAYS_PERPLEXITY_REASONING_EFFORT": "high",
+            "LAST30DAYS_PERPLEXITY_AGENT_MAX_STEPS": "4",
         }
         with patch("lib.perplexity.http.post", return_value=response) as post:
             items, artifact = perplexity.search(
                 "test topic",
                 ("2026-05-01", "2026-06-01"),
-                {
-                    "PERPLEXITY_API_KEY": "pplx-test",
-                    "OPENROUTER_API_KEY": "or-test",
-                },
+                config,
             )
 
         url, payload = post.call_args.args[:2]
         headers = post.call_args.kwargs["headers"]
-        self.assertEqual(perplexity.PERPLEXITY_URL, url)
+        tool = payload["tools"][0]
+        self.assertEqual(perplexity.PERPLEXITY_AGENT_URL, url)
         self.assertEqual("Bearer pplx-test", headers["Authorization"])
-        self.assertEqual("sonar-pro", payload["model"])
+        self.assertEqual("perplexity/sonar", payload["model"])
+        self.assertIn("input", payload)
+        self.assertIn("instructions", payload)
+        self.assertEqual(4, payload["max_steps"])
+        self.assertEqual({"effort": "high"}, payload["reasoning"])
+        self.assertEqual("web_search", tool["type"])
+        self.assertEqual(3, tool["max_results"])
+        self.assertEqual("low", tool["search_context_size"])
+        self.assertEqual({"country": "US"}, tool["user_location"])
         self.assertEqual(
-            "05/01/2026",
-            payload["web_search_options"]["search_after_date_filter"],
+            ["example.com", "example.org"],
+            tool["filters"]["search_domain_filter"],
         )
-        self.assertEqual(
-            "06/01/2026",
-            payload["web_search_options"]["search_before_date_filter"],
-        )
+        self.assertEqual("05/01/2026", tool["filters"]["search_after_date_filter"])
+        self.assertEqual("06/01/2026", tool["filters"]["search_before_date_filter"])
+        self.assertNotIn("search_recency_filter", tool["filters"])
+        self.assertNotIn("preset", payload)
+
         self.assertEqual("perplexity", artifact["provider"])
-        self.assertEqual("sonar-pro", artifact["model"])
+        self.assertEqual("agent", artifact["mode"])
+        self.assertEqual("agent", artifact["endpoint"])
+        self.assertEqual("perplexity/sonar", artifact["model"])
+        self.assertEqual(perplexity.PERPLEXITY_CONTROLLED_PROFILE, artifact["profile"])
+        self.assertFalse(artifact["dynamicPreset"])
+        self.assertEqual("agent-1", artifact["responseId"])
+        self.assertEqual(["message", "search_results"], artifact["outputTypes"])
+        self.assertNotIn("input", artifact["request"])
+        self.assertNotIn("instructions", artifact["request"])
+        self.assertEqual({"effort": "high"}, artifact["request"]["reasoning"])
         self.assertEqual("Example A", items[1]["title"])
         self.assertEqual("Direct source snippet", items[1]["snippet"])
 
-    def test_direct_model_config_selects_supported_sonar_model(self):
-        response = {
-            "choices": [{"message": {"content": "Reasoned synthesis"}}],
-            "citations": [],
-            "search_results": [],
-        }
+    def test_legacy_sonar_mode_is_an_agent_alias(self):
+        response = _agent_response()
         with patch("lib.perplexity.http.post", return_value=response) as post:
             _, artifact = perplexity.search(
                 "test topic",
                 ("2026-05-01", "2026-06-01"),
                 {
                     "PERPLEXITY_API_KEY": "pplx-test",
-                    "LAST30DAYS_PERPLEXITY_MODEL": "sonar-reasoning-pro",
-                    "LAST30DAYS_PERPLEXITY_REASONING_EFFORT": "high",
+                    "LAST30DAYS_PERPLEXITY_MODE": "sonar",
+                    "LAST30DAYS_PERPLEXITY_MODEL": "sonar-pro",
+                },
+            )
+
+        self.assertEqual(perplexity.PERPLEXITY_AGENT_URL, post.call_args.args[0])
+        self.assertEqual("perplexity/sonar", post.call_args.args[1]["model"])
+        self.assertEqual("agent", artifact["mode"])
+
+    def test_explicit_agent_preset_is_marked_dynamic(self):
+        response = _agent_response()
+        with patch("lib.perplexity.http.post", return_value=response) as post:
+            _, artifact = perplexity.search(
+                "test topic",
+                ("2026-05-01", "2026-06-01"),
+                {
+                    "PERPLEXITY_API_KEY": "pplx-test",
+                    "LAST30DAYS_PERPLEXITY_AGENT_PRESET": "low",
                 },
             )
 
         payload = post.call_args.args[1]
-        self.assertEqual("sonar-reasoning-pro", payload["model"])
-        self.assertEqual("high", payload["reasoning_effort"])
-        self.assertEqual("sonar-reasoning-pro", artifact["model"])
+        self.assertEqual("low", payload["preset"])
+        self.assertIn("input", payload)
+        self.assertNotIn("model", payload)
+        self.assertEqual("web_search", payload["tools"][0]["type"])
+        self.assertEqual(10, payload["tools"][0]["max_results"])
+        self.assertTrue(artifact["dynamicPreset"])
+        self.assertEqual("low", artifact["preset"])
+        self.assertEqual(perplexity.PERPLEXITY_PRESET_PROFILE, artifact["profile"])
 
-    def test_openrouter_fallback_uses_openrouter_models_and_annotations(self):
+    def test_agent_falls_back_to_message_output_when_output_text_is_missing(self):
+        citations = [
+            {
+                "title": "Example A",
+                "url": "https://example.com/a",
+                "snippet": "Direct source snippet",
+            }
+        ]
+        response = _agent_response(
+            "Message-only synthesis",
+            citations=citations,
+            include_output_text=False,
+        )
+        with patch("lib.perplexity.http.post", return_value=response):
+            items, artifact = perplexity.search(
+                "test topic",
+                ("2026-05-01", "2026-06-01"),
+                {"PERPLEXITY_API_KEY": "pplx-test"},
+            )
+
+        self.assertEqual("Message-only synthesis", items[0]["snippet"])
+        self.assertEqual(1, artifact["citationCount"])
+
+    def test_malformed_agent_output_returns_safe_empty_artifact(self):
         response = {
-            "choices": [
-                {
-                    "message": {
-                        "content": "OpenRouter synthesis",
-                        "annotations": [
-                            {
-                                "url_citation": {
-                                    "url": "https://example.com/b",
-                                    "title": "Example B",
-                                }
-                            }
-                        ],
-                    }
-                }
-            ],
+            "id": "agent-empty",
+            "status": "completed",
+            "output": [{"type": "function_call", "arguments": "untrusted trace"}],
+            "usage": {"total_tokens": 2},
         }
-        with patch("lib.perplexity.http.post", return_value=response) as post:
+        with patch("lib.perplexity.http.post", return_value=response):
+            items, artifact = perplexity.search(
+                "test topic",
+                ("2026-05-01", "2026-06-01"),
+                {"PERPLEXITY_API_KEY": "pplx-test"},
+            )
+
+        self.assertEqual([], items)
+        self.assertEqual("empty_synthesis", artifact["error"])
+        self.assertEqual(["function_call"], artifact["outputTypes"])
+        self.assertNotIn("arguments", artifact)
+
+    def test_sync_terminal_failure_keeps_safe_response_metadata(self):
+        response = {
+            "id": "agent-failed",
+            "status": "failed",
+            "error": {"message": "Provider safely rejected this request"},
+            "output": [{"type": "function_call", "arguments": "raw tool trace"}],
+            "usage": {"total_tokens": 7},
+        }
+        with patch("lib.perplexity.http.post", return_value=response):
+            items, artifact = perplexity.search(
+                "test topic",
+                ("2026-05-01", "2026-06-01"),
+                {"PERPLEXITY_API_KEY": "pplx-test"},
+            )
+
+        self.assertEqual([], items)
+        self.assertEqual("failed", artifact["error"])
+        self.assertEqual("agent-failed", artifact["responseId"])
+        self.assertEqual("failed", artifact["status"])
+        self.assertEqual("Provider safely rejected this request", artifact["agentErrorMessage"])
+        self.assertEqual({"total_tokens": 7}, artifact["usage"])
+        self.assertEqual(["function_call"], artifact["outputTypes"])
+        self.assertNotIn("arguments", artifact)
+
+    def test_openrouter_only_config_skips_without_http(self):
+        with patch("lib.perplexity.http.post") as post, patch("lib.perplexity.http.get") as get:
             items, artifact = perplexity.search(
                 "test topic",
                 ("2026-05-01", "2026-06-01"),
                 {"OPENROUTER_API_KEY": "or-test"},
-                deep=True,
             )
 
-        url, payload = post.call_args.args[:2]
-        headers = post.call_args.kwargs["headers"]
-        self.assertEqual(perplexity.OPENROUTER_URL, url)
-        self.assertEqual("Bearer or-test", headers["Authorization"])
-        self.assertEqual("perplexity/sonar-deep-research", payload["model"])
-        self.assertEqual(120, post.call_args.kwargs["timeout"])
-        self.assertEqual("openrouter", artifact["provider"])
-        self.assertEqual("perplexity/sonar-deep-research", artifact["model"])
-        self.assertEqual("Example B", items[1]["title"])
+        post.assert_not_called()
+        get.assert_not_called()
+        self.assertEqual([], items)
+        self.assertEqual({}, artifact)
 
     def test_search_api_mode_returns_ranked_rows_with_filters(self):
         response = {
@@ -143,6 +263,7 @@ class PerplexityProviderTests(unittest.TestCase):
         self.assertEqual("low", payload["search_context_size"])
         self.assertEqual("US", payload["country"])
         self.assertEqual(["example.com", "example.org"], payload["search_domain_filter"])
+        self.assertEqual(["en"], payload["search_language_filter"])
         self.assertEqual("05/01/2026", payload["search_after_date_filter"])
         self.assertEqual("06/01/2026", payload["search_before_date_filter"])
         self.assertNotIn("search_recency_filter", payload)
@@ -179,21 +300,19 @@ class PerplexityProviderTests(unittest.TestCase):
                 },
             ],
         }
-        sonar_response = {
-            "choices": [{"message": {"content": "Sonar synthesis"}}],
-            "citations": ["https://example.com/a"],
-            "search_results": [
+        agent_response = _agent_response(
+            citations=[
                 {
                     "title": "Citation result",
                     "url": "https://example.com/a",
                     "snippet": "Citation row",
                     "date": "2026-05-15",
                 }
-            ],
-        }
+            ]
+        )
         with patch(
             "lib.perplexity.http.post",
-            side_effect=[search_response, sonar_response],
+            side_effect=[search_response, agent_response],
         ) as post:
             items, artifact = perplexity.search(
                 "test topic",
@@ -205,14 +324,16 @@ class PerplexityProviderTests(unittest.TestCase):
             )
 
         self.assertEqual(perplexity.PERPLEXITY_SEARCH_URL, post.call_args_list[0].args[0])
-        self.assertEqual(perplexity.PERPLEXITY_URL, post.call_args_list[1].args[0])
+        self.assertEqual(perplexity.PERPLEXITY_AGENT_URL, post.call_args_list[1].args[0])
         self.assertEqual("both", artifact["mode"])
         self.assertEqual(3, artifact["itemCount"])
         self.assertEqual("perplexity.ai", items[0]["source_domain"])
         urls = [item["url"] for item in items if item["url"]]
         self.assertEqual(["https://example.com/a", "https://example.com/unique"], urls)
+        self.assertIn("agent", artifact)
+        self.assertNotIn("sonar", artifact)
 
-    def test_both_mode_keeps_search_rows_when_sonar_leg_fails(self):
+    def test_both_mode_keeps_search_rows_when_agent_leg_fails(self):
         search_response = {
             "id": "search-1",
             "results": [
@@ -242,35 +363,26 @@ class PerplexityProviderTests(unittest.TestCase):
 
         self.assertEqual("Raw result", items[0]["title"])
         self.assertEqual(1, artifact["itemCount"])
-        self.assertEqual("HTTPError", artifact["sonar"]["error"])
-        self.assertEqual(500, artifact["sonar"]["statusCode"])
+        self.assertEqual("HTTPError", artifact["agent"]["error"])
+        self.assertEqual(500, artifact["agent"]["statusCode"])
 
-    def test_direct_deep_research_uses_async_api_and_wall_timeout_config(self):
-        create_response = {"id": "async-1", "status": "CREATED", "created_at": 123}
-        complete_response = {
-            "id": "async-1",
-            "status": "COMPLETED",
-            "created_at": 123,
-            "started_at": 124,
-            "completed_at": 130,
-            "response": {
-                "choices": [{"message": {"content": "Deep synthesis"}}],
-                "citations": ["https://example.com/deep"],
-                "search_results": [
-                    {
-                        "title": "Deep citation",
-                        "url": "https://example.com/deep",
-                        "snippet": "Deep snippet",
-                    }
-                ],
-                "usage": {
-                    "total_tokens": 123,
-                    "cost": {"total_cost": 0.12},
-                },
-            },
-        }
-        with patch("lib.perplexity.http.post", return_value=create_response) as post, \
-             patch("lib.perplexity.http.get", return_value=complete_response) as get:
+    def test_deep_research_uses_agent_background_high_preset(self):
+        created = {"id": "agent-deep-1", "status": "queued"}
+        completed = _agent_response(
+            "Deep synthesis",
+            response_id="agent-deep-1",
+            citations=[
+                {
+                    "title": "Deep citation",
+                    "url": "https://example.com/deep",
+                    "snippet": "Deep snippet",
+                }
+            ],
+        )
+        with patch("lib.perplexity.http.post", return_value=created) as post, patch(
+            "lib.perplexity.http.get",
+            return_value=completed,
+        ) as get:
             items, artifact = perplexity.search(
                 "test topic",
                 ("2026-05-01", "2026-06-01"),
@@ -281,36 +393,37 @@ class PerplexityProviderTests(unittest.TestCase):
                 deep=True,
             )
 
-        self.assertEqual(perplexity.PERPLEXITY_ASYNC_URL, post.call_args.args[0])
+        self.assertEqual(perplexity.PERPLEXITY_AGENT_URL, post.call_args.args[0])
+        payload = post.call_args.args[1]
+        self.assertEqual("high", payload["preset"])
+        self.assertTrue(payload["background"])
+        self.assertNotIn("model", payload)
+        tool = payload["tools"][0]
+        self.assertEqual("web_search", tool["type"])
+        self.assertEqual(10, tool["max_results"])
+        self.assertEqual("05/01/2026", tool["filters"]["search_after_date_filter"])
+        self.assertEqual("06/01/2026", tool["filters"]["search_before_date_filter"])
         self.assertEqual(
-            perplexity.PERPLEXITY_ASYNC_URL,
-            perplexity._provider({"PERPLEXITY_API_KEY": "pplx-test"}, deep=True)[2],
+            f"{perplexity.PERPLEXITY_AGENT_URL}/agent-deep-1",
+            get.call_args.args[0],
         )
-        create_payload = post.call_args.args[1]
-        self.assertEqual("sonar-deep-research", create_payload["request"]["model"])
-        self.assertTrue(create_payload["idempotency_key"].startswith("last30days:"))
-        self.assertEqual(f"{perplexity.PERPLEXITY_ASYNC_URL}/async-1", get.call_args.args[0])
-        self.assertEqual("async-sonar", artifact["endpoint"])
-        self.assertEqual(True, artifact["async"])
-        self.assertEqual(300, artifact["asyncTimeoutSeconds"])
-        self.assertEqual(create_payload["idempotency_key"], artifact["asyncIdempotencyKey"])
-        self.assertEqual(1, artifact["asyncPollCount"])
-        self.assertEqual("COMPLETED_REMOTE", artifact["asyncLocalStatus"])
-        self.assertEqual(123, artifact["asyncCreatedAt"])
-        self.assertEqual(124, artifact["asyncStartedAt"])
-        self.assertEqual(130, artifact["asyncCompletedAt"])
+        self.assertEqual("agent-background", artifact["endpoint"])
+        self.assertTrue(artifact["background"])
+        self.assertEqual(300, artifact["backgroundTimeoutSeconds"])
+        self.assertEqual(1, artifact["backgroundPollCount"])
+        self.assertEqual("COMPLETED_REMOTE", artifact["backgroundLocalStatus"])
+        self.assertEqual("high", artifact["preset"])
+        self.assertTrue(artifact["dynamicPreset"])
         self.assertEqual(123, items[0]["metadata"]["usage"]["total_tokens"])
 
-    def test_direct_deep_research_timeout_returns_empty_result(self):
-        with patch("lib.perplexity.http.post", return_value={"id": "async-1", "status": "CREATED", "created_at": 123}), \
-             patch("lib.perplexity.http.get", return_value={
-                 "id": "async-1",
-                 "status": "IN_PROGRESS",
-                 "created_at": 123,
-                 "started_at": 124,
-             }), \
-             patch("lib.perplexity.time.monotonic", side_effect=[0, 0, 2, 2]), \
-             patch("lib.perplexity.time.sleep"):
+    def test_deep_research_timeout_preserves_background_response_id(self):
+        with patch(
+            "lib.perplexity.http.post",
+            return_value={"id": "agent-deep-1", "status": "queued"},
+        ) as post, patch(
+            "lib.perplexity.time.monotonic",
+            side_effect=[0, 1],
+        ), patch("lib.perplexity.http.get") as get:
             items, artifact = perplexity.search(
                 "test topic",
                 ("2026-05-01", "2026-06-01"),
@@ -321,49 +434,47 @@ class PerplexityProviderTests(unittest.TestCase):
                 deep=True,
             )
 
+        post.assert_called_once()
+        get.assert_not_called()
         self.assertEqual([], items)
         self.assertEqual("timeout", artifact["error"])
-        self.assertEqual("async-1", artifact["asyncRequestId"])
-        self.assertEqual("IN_PROGRESS", artifact["asyncStatus"])
-        self.assertEqual(1, artifact["asyncTimeoutSeconds"])
-        self.assertEqual(1, artifact["asyncPollCount"])
-        self.assertEqual("PENDING_REMOTE", artifact["asyncLocalStatus"])
-        self.assertEqual(123, artifact["asyncCreatedAt"])
-        self.assertEqual(124, artifact["asyncStartedAt"])
+        self.assertEqual("agent-deep-1", artifact["responseId"])
+        self.assertEqual("queued", artifact["backgroundStatus"])
+        self.assertEqual(1, artifact["backgroundTimeoutSeconds"])
+        self.assertEqual(0, artifact["backgroundPollCount"])
+        self.assertEqual("PENDING_REMOTE", artifact["backgroundLocalStatus"])
 
-    def test_direct_deep_research_failed_status_returns_failure_artifact(self):
-        with patch("lib.perplexity.http.post", return_value={"id": "async-1", "status": "CREATED"}), \
-             patch("lib.perplexity.http.get", return_value={
-                 "id": "async-1",
-                 "status": "FAILED",
-                 "failed_at": 130,
-                 "error_message": "provider failure",
-             }):
-            items, artifact = perplexity.search(
-                "test topic",
-                ("2026-05-01", "2026-06-01"),
-                {"PERPLEXITY_API_KEY": "pplx-test"},
-                deep=True,
-            )
+    def test_deep_research_terminal_failures_are_recorded(self):
+        for status in ("failed", "cancelled", "incomplete"):
+            with self.subTest(status=status), patch(
+                "lib.perplexity.http.post",
+                return_value={"id": "agent-deep-1", "status": status},
+            ) as post, patch("lib.perplexity.http.get") as get:
+                items, artifact = perplexity.search(
+                    "test topic",
+                    ("2026-05-01", "2026-06-01"),
+                    {"PERPLEXITY_API_KEY": "pplx-test"},
+                    deep=True,
+                )
 
-        self.assertEqual([], items)
-        self.assertEqual("failed", artifact["error"])
-        self.assertEqual("async-1", artifact["asyncRequestId"])
-        self.assertEqual("FAILED", artifact["asyncStatus"])
-        self.assertEqual("FAILED_REMOTE", artifact["asyncLocalStatus"])
-        self.assertEqual(130, artifact["asyncFailedAt"])
-        self.assertEqual("provider failure", artifact["asyncErrorMessage"])
+            post.assert_called_once()
+            get.assert_not_called()
+            self.assertEqual([], items)
+            self.assertEqual("failed", artifact["error"])
+            self.assertEqual(status, artifact["backgroundStatus"])
+            self.assertEqual("TERMINAL_REMOTE", artifact["backgroundLocalStatus"])
 
-    def test_direct_deep_research_poll_error_preserves_async_id(self):
-        with patch("lib.perplexity.http.post", return_value={
-            "id": "async-1",
-            "status": "CREATED",
-            "created_at": 123,
-        }), \
-             patch("lib.perplexity.http.get", side_effect=perplexity.http.HTTPError(
-                 "HTTP 429: Too Many Requests",
-                 status_code=429,
-             )):
+    def test_deep_research_poll_error_preserves_response_id(self):
+        with patch(
+            "lib.perplexity.http.post",
+            return_value={"id": "agent-deep-1", "status": "queued"},
+        ), patch(
+            "lib.perplexity.http.get",
+            side_effect=perplexity.http.HTTPError(
+                "HTTP 429: Too Many Requests",
+                status_code=429,
+            ),
+        ):
             items, artifact = perplexity.search(
                 "test topic",
                 ("2026-05-01", "2026-06-01"),
@@ -373,153 +484,11 @@ class PerplexityProviderTests(unittest.TestCase):
 
         self.assertEqual([], items)
         self.assertEqual("poll_error", artifact["error"])
-        self.assertEqual("async-1", artifact["asyncRequestId"])
-        self.assertEqual("CREATED", artifact["asyncStatus"])
-        self.assertEqual("POLL_ERROR", artifact["asyncLocalStatus"])
-        self.assertEqual(1, artifact["asyncPollCount"])
-        self.assertEqual(429, artifact["asyncPollStatusCode"])
-
-    def test_direct_deep_research_malformed_completed_preserves_async_id(self):
-        with patch("lib.perplexity.http.post", return_value={
-            "id": "async-1",
-            "status": "CREATED",
-            "created_at": 123,
-        }), \
-             patch("lib.perplexity.http.get", return_value={
-                 "id": "async-1",
-                 "status": "COMPLETED",
-                 "created_at": 123,
-                 "completed_at": 130,
-                 "response": None,
-             }):
-            items, artifact = perplexity.search(
-                "test topic",
-                ("2026-05-01", "2026-06-01"),
-                {"PERPLEXITY_API_KEY": "pplx-test"},
-                deep=True,
-            )
-
-        self.assertEqual([], items)
-        self.assertEqual("failed", artifact["error"])
-        self.assertEqual("async-1", artifact["asyncRequestId"])
-        self.assertEqual("COMPLETED", artifact["asyncStatus"])
-        self.assertEqual("FAILED_REMOTE", artifact["asyncLocalStatus"])
-        self.assertEqual(1, artifact["asyncPollCount"])
-        self.assertEqual(130, artifact["asyncCompletedAt"])
-        self.assertEqual(
-            "Async Deep Research completed without response",
-            artifact["asyncErrorMessage"],
-        )
-
-    def test_direct_deep_research_empty_choices_preserves_async_id(self):
-        with patch("lib.perplexity.http.post", return_value={
-            "id": "async-1",
-            "status": "CREATED",
-            "created_at": 123,
-        }) as post, \
-             patch("lib.perplexity.http.get", return_value={
-                 "id": "async-1",
-                 "status": "COMPLETED",
-                 "created_at": 123,
-                 "completed_at": 130,
-                 "response": {
-                     "choices": [],
-                     "usage": {"total_tokens": 321},
-                 },
-             }):
-            items, artifact = perplexity.search(
-                "test topic",
-                ("2026-05-01", "2026-06-01"),
-                {"PERPLEXITY_API_KEY": "pplx-test"},
-                deep=True,
-            )
-
-        self.assertEqual([], items)
-        self.assertEqual("empty_choices", artifact["error"])
-        self.assertEqual("async-1", artifact["asyncRequestId"])
-        self.assertEqual("COMPLETED", artifact["asyncStatus"])
-        self.assertEqual("COMPLETED_REMOTE", artifact["asyncLocalStatus"])
-        self.assertEqual(1, artifact["asyncPollCount"])
-        self.assertEqual(130, artifact["asyncCompletedAt"])
-        self.assertEqual(
-            post.call_args.args[1]["idempotency_key"],
-            artifact["asyncIdempotencyKey"],
-        )
-        self.assertEqual(321, artifact["usage"]["total_tokens"])
-        self.assertEqual(
-            "Async Deep Research completed without choices",
-            artifact["asyncErrorMessage"],
-        )
-
-    def test_direct_deep_research_empty_synthesis_preserves_async_id(self):
-        with patch("lib.perplexity.http.post", return_value={
-            "id": "async-1",
-            "status": "CREATED",
-            "created_at": 123,
-        }) as post, \
-             patch("lib.perplexity.http.get", return_value={
-                 "id": "async-1",
-                 "status": "COMPLETED",
-                 "created_at": 123,
-                 "completed_at": 130,
-                 "response": {
-                     "choices": [{"message": {"content": ""}}],
-                 },
-             }):
-            items, artifact = perplexity.search(
-                "test topic",
-                ("2026-05-01", "2026-06-01"),
-                {"PERPLEXITY_API_KEY": "pplx-test"},
-                deep=True,
-            )
-
-        self.assertEqual([], items)
-        self.assertEqual("empty_synthesis", artifact["error"])
-        self.assertEqual("async-1", artifact["asyncRequestId"])
-        self.assertEqual("COMPLETED", artifact["asyncStatus"])
-        self.assertEqual("COMPLETED_REMOTE", artifact["asyncLocalStatus"])
-        self.assertEqual(1, artifact["asyncPollCount"])
-        self.assertEqual(130, artifact["asyncCompletedAt"])
-        self.assertEqual(
-            post.call_args.args[1]["idempotency_key"],
-            artifact["asyncIdempotencyKey"],
-        )
-        self.assertEqual(
-            "Async Deep Research completed with empty synthesis",
-            artifact["asyncErrorMessage"],
-        )
-
-    def test_direct_deep_research_malformed_choice_preserves_async_id(self):
-        with patch("lib.perplexity.http.post", return_value={
-            "id": "async-1",
-            "status": "CREATED",
-            "created_at": 123,
-        }) as post, \
-             patch("lib.perplexity.http.get", return_value={
-                 "id": "async-1",
-                 "status": "COMPLETED",
-                 "created_at": 123,
-                 "completed_at": 130,
-                 "response": {
-                     "choices": [None],
-                 },
-             }):
-            items, artifact = perplexity.search(
-                "test topic",
-                ("2026-05-01", "2026-06-01"),
-                {"PERPLEXITY_API_KEY": "pplx-test"},
-                deep=True,
-            )
-
-        self.assertEqual([], items)
-        self.assertEqual("empty_synthesis", artifact["error"])
-        self.assertEqual("async-1", artifact["asyncRequestId"])
-        self.assertEqual("COMPLETED", artifact["asyncStatus"])
-        self.assertEqual("COMPLETED_REMOTE", artifact["asyncLocalStatus"])
-        self.assertEqual(
-            post.call_args.args[1]["idempotency_key"],
-            artifact["asyncIdempotencyKey"],
-        )
+        self.assertEqual("agent-deep-1", artifact["responseId"])
+        self.assertEqual("queued", artifact["backgroundStatus"])
+        self.assertEqual("POLL_ERROR", artifact["backgroundLocalStatus"])
+        self.assertEqual(1, artifact["backgroundPollCount"])
+        self.assertEqual(429, artifact["backgroundPollStatusCode"])
 
     def test_missing_keys_skip_without_http(self):
         with patch("lib.perplexity.http.post") as post:
@@ -532,3 +501,7 @@ class PerplexityProviderTests(unittest.TestCase):
         post.assert_not_called()
         self.assertEqual([], items)
         self.assertEqual({}, artifact)
+
+
+if __name__ == "__main__":
+    unittest.main()

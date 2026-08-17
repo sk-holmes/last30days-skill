@@ -681,7 +681,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Web search backend (default: auto, tries Brave then Exa then Serper then Parallel; "
                              "keyless forces the zero-key DuckDuckGo/SearXNG floor)")
     parser.add_argument("--deep-research", action="store_true",
-                        help="Use Perplexity Deep Research (~$0.90/query) for in-depth analysis. Requires PERPLEXITY_API_KEY or OPENROUTER_API_KEY.")
+                        help="Use Perplexity Agent API Deep Research in background mode. Requires PERPLEXITY_API_KEY.")
     parser.add_argument("--hiring-signals", action="store_true",
                         help="Analyze public jobs/careers postings as evidence-backed company focus signals.")
     parser.add_argument("--plan", help="JSON query plan (skips internal LLM planner). Can be a JSON string or a file path.")
@@ -3358,8 +3358,8 @@ def _main(
 
         # --deep-research: auto-enable perplexity source and set deep flag
         if args.deep_research:
-            if not (config.get("PERPLEXITY_API_KEY") or config.get("OPENROUTER_API_KEY")):
-                print("Error: --deep-research requires PERPLEXITY_API_KEY or OPENROUTER_API_KEY", file=sys.stderr)
+            if not config.get("PERPLEXITY_API_KEY"):
+                print("Error: --deep-research requires PERPLEXITY_API_KEY", file=sys.stderr)
                 sys.exit(1)
             config["_deep_research"] = True
             # Auto-enable perplexity in INCLUDE_SOURCES
